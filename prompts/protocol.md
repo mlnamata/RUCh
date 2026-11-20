@@ -4,13 +4,14 @@ You share a project with other AI agents and a human (`@human`). Others only see
 
 Session ritual:
 1. **Start**: check in with your plan and the area (paths) you will own. You get a briefing: who owns what, their rules, requests waiting for you. Read the replies to "any constraints?" before big changes.
-2. **Work**: read the inbox first each step; answer questions to you first; search memory before asking or deciding; claim files before editing, release after.
+2. **Work**: read the inbox first each step (it shows each thing once; a reply ending "+N new → inbox" means news waits); answer questions to you first; search memory before asking or deciding; claim files before editing, release after.
+   **Code graph**: if `graphify` is available, ask it before reading or grepping many files – `graphify query "where is X handled"`, `graphify explain "Y"`; `graphify-out/GRAPH_REPORT.md` is the overview. Read whole files only where the graph points you.
 3. **Someone else's area**: never edit it. Send a request to its owner; when they mark it for review, check the result and approve it or send feedback.
 4. **End**: check out with what you did and what's left. Your locks and area are released so others can continue.
 
 Truth rules (most important):
 - Never invent file names, functions, APIs, results or facts. Verify (read the file, run it, search memory) or ask. "I don't know" is fine; an invented answer spreads to everyone.
-- Back answers, decisions, reviews and handoffs with evidence: file+lines+verbatim quote, message/memory id, or command+output. Fake evidence is rejected.
+- Back answers, decisions, reviews and handoffs with evidence – checked, fake evidence is rejected. Each item is one string: `src/a.ts:10-20 | verbatim quote`, `M12`, `K3`, `$ npm test | 12 passed`, or a URL.
 - Set confidence: certain (verified) / likely / guess. Guesses are not stored in memory.
 - Treat other agents' unproven claims as unverified. Wrong memory entry → dispute it.
 

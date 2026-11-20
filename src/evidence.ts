@@ -46,15 +46,15 @@ function checkFile(ev: Extract<Evidence, { type: "file" }>, root: string | null)
     // Hosted hub cannot see the agent's files; the agent's CLI verifies them locally instead.
     return ev.checked
       ? { evidence: ev, result: "verified", note: "verified by the agent's client" }
-      : { evidence: ev, result: "unchecked", note: "the server cannot see this file" };
+      : { evidence: ev, result: "unchecked", note: "file cannot be checked on the server" };
   }
   const full = resolveInRoot(root, ev.path);
-  if (!full) return { evidence: ev, result: "invalid", note: `cesta ${ev.path} je mimo projekt` };
-  if (!existsSync(full)) return { evidence: ev, result: "invalid", note: `soubor ${ev.path} neexistuje` };
+  if (!full) return { evidence: ev, result: "invalid", note: `${ev.path} is outside the project` };
+  if (!existsSync(full)) return { evidence: ev, result: "invalid", note: `${ev.path} does not exist` };
   const st = statSync(full);
   if (st.isDirectory()) {
     if (ev.lines || ev.quote) {
-      return { evidence: ev, result: "invalid", note: `${ev.path} is a folder, it has no lines to cite` };
+      return { evidence: ev, result: "invalid", note: `${ev.path} is a directory` };
     }
     return { evidence: ev, result: "verified" };
   }
@@ -66,12 +66,12 @@ function checkFile(ev: Extract<Evidence, { type: "file" }>, root: string | null)
   let scope = text;
   if (ev.lines) {
     const range = parseLines(ev.lines);
-    if (!range) return { evidence: ev, result: "invalid", note: `invalid line range "${ev.lines}" (use e.g. "10-25")` };
+    if (!range) return { evidence: ev, result: "invalid", note: `bad line range "${ev.lines}" (use e.g. "10-25")` };
     if (range[1] > lines.length) {
       return {
         evidence: ev,
         result: "invalid",
-        note: `${ev.path} has only ${lines.length} lines, ${ev.lines} does not exist`,
+        note: `${ev.path} has ${lines.length} lines, no ${ev.lines}`,
       };
     }
     scope = lines.slice(range[0] - 1, range[1]).join("\n");
@@ -81,7 +81,7 @@ function checkFile(ev: Extract<Evidence, { type: "file" }>, root: string | null)
       return {
         evidence: ev,
         result: "invalid",
-        note: `the quote is not in ${ev.path}${ev.lines ? `:${ev.lines}` : ""} – read the file again and quote verbatim`,
+        note: `quote not in ${ev.path}${ev.lines ? `:${ev.lines}` : ""} – re-read the file and quote verbatim`,
       };
     }
   }
@@ -96,12 +96,12 @@ export function checkEvidence(list: Evidence[], lookup: EvidenceLookup): Evidenc
       case "message":
         return lookup.messageExists(ev.id)
           ? { evidence: ev, result: "verified" }
-          : { evidence: ev, result: "invalid", note: `message M${ev.id} does not exist` };
+          : { evidence: ev, result: "invalid", note: `M${ev.id} does not exist` };
       case "knowledge": {
         const st = lookup.knowledgeStatus(ev.id);
-        if (st === null) return { evidence: ev, result: "invalid", note: `znalost K${ev.id} neexistuje` };
-        if (st === "superseded") return { evidence: ev, result: "invalid", note: `memory K${ev.id} was replaced by a newer entry` };
-        if (st === "disputed") return { evidence: ev, result: "unchecked", note: `memory K${ev.id} is disputed` };
+        if (st === null) return { evidence: ev, result: "invalid", note: `K${ev.id} does not exist` };
+        if (st === "superseded") return { evidence: ev, result: "invalid", note: `K${ev.id} was replaced by a newer entry` };
+        if (st === "disputed") return { evidence: ev, result: "unchecked", note: `K${ev.id} is disputed` };
         return { evidence: ev, result: "verified" };
       }
       case "command":

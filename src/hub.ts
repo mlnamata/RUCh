@@ -1435,29 +1435,31 @@ export class Hub {
     );
   }
 
+  private static readonly RELEVANT = `m.project_id = ? AND m.id > ? AND (m.author_id IS NULL OR m.author_id != ?)
+      AND (? = 'human' OR p.kind = 'human' OR m.kind = 'decision'
+           OR EXISTS (SELECT 1 FROM thread_members tm WHERE tm.thread_id = m.thread_id AND tm.participant_id = ? AND tm.since_id <= m.id))`;
+  private static readonly Q_FOR = "q.project_id = ? AND q.status = 'open' AND (q.target_id = ? OR (q.target_id IS NULL AND (q.asked_by IS NULL OR q.asked_by != ?)))";
+
+  /** How many unseen messages and not-yet-announced questions wait for the participant. */
+  pending(p: Participant): number {
+    const me = this.one<{ inbox_cursor: number; q_cursor: number }>("SELECT inbox_cursor, q_cursor FROM participants WHERE id = ?", p.id);
+    if (!me) return 0;
+    const m = this.one<{ c: number }>(`SELECT COUNT(*) AS c FROM messages m LEFT JOIN participants p ON p.id = m.author_id WHERE ${Hub.RELEVANT}`, p.project_id, me.inbox_cursor, p.id, p.kind, p.id)!.c;
+    const q = this.one<{ c: number }>(`SELECT COUNT(*) AS c FROM questions q WHERE ${Hub.Q_FOR} AND q.n > ?`, p.project_id, p.id, p.id, me.q_cursor)!.c;
+    return m + q;
+  }
+
   /**
-   * Everything new and relevant since the participant's cursor, in one indexed query.
+   * Everything new and relevant since the participant's cursors.
    * Relevance: human messages, decisions, and threads the agent takes part in (from the moment it joined them).
+   * Standing state (open questions, tasks, locks, paused threads) is flagged in `changed` only when it differs
+   * from what this participant was last shown, so agents do not re-read it on every call.
    */
-  inbox(p: Participant, opts: { peek?: boolean } = {}) {
+  inbox(p: Participant, opts: { peek?: boolean; all?: boolean } = {}) {
     const me = this.one<Participant>("SELECT * FROM participants WHERE id = ?", p.id)!;
     const cursor = me.inbox_cursor;
     const limit = this.config.inboxLimit;
-    const rows =
-      me.kind === "human"
-        ? this.all<Row>(`${MSG_SELECT} WHERE m.project_id = ? AND m.id > ? AND (m.author_id IS NULL OR m.author_id != ?) ORDER BY m.id LIMIT ?`, me.project_id, cursor, me.id, limit + 1)
-        : this.all<Row>(
-            `${MSG_SELECT}
-              WHERE m.project_id = ? AND m.id > ? AND (m.author_id IS NULL OR m.author_id != ?)
-                AND (p.kind = 'human' OR m.kind = 'decision'
-                     OR EXISTS (SELECT 1 FROM thread_members tm WHERE tm.thread_id = m.thread_id AND tm.participant_id = ? AND tm.since_id <= m.id))
-              ORDER BY m.id LIMIT ?`,
-            me.project_id,
-            cursor,
-            me.id,
-            me.id,
-            limit + 1,
-          );
+    const rows = this.all<Row>(`${MSG_SELECT} WHERE ${Hub.RELEVANT} ORDER BY m.id LIMIT ?`, me.project_id, cursor, me.id, me.kind, me.id, limit + 1);
     const more = rows.length > limit;
     const kept = rows.slice(0, limit);
     const messages = kept.map((r) => this.messageView(r));
@@ -1468,49 +1470,69 @@ export class Hub {
       (t) => ({ id: Number(t.n), title: String(t.title), by: str(t.creator) }),
     );
     const maxThread = this.one<{ m: number | null }>("SELECT MAX(id) AS m FROM threads WHERE project_id = ?", me.project_id)?.m ?? 0;
+    const maxQuestion = this.one<{ m: number | null }>("SELECT MAX(n) AS m FROM questions WHERE project_id = ?", me.project_id)?.m ?? 0;
     const myQuestions = this.all<Row>(`${Q_SELECT} WHERE q.asked_by = ? AND (q.status = 'open' OR q.answer_message_id > ?) ORDER BY q.id DESC LIMIT 20`, me.id, cursor).map((r) =>
       this.questionView(r),
     );
-    if (!opts.peek) {
-      this.run("UPDATE participants SET inbox_cursor = ?, thread_cursor = ?, last_seen_at = ? WHERE id = ?", newCursor, Math.max(me.thread_cursor, maxThread), now(), me.id);
-    }
+    const forMe = this.listQuestions(me.project_id, { status: "open", for: me });
+    const paused = this.all<Row>(
+      `${T_SELECT} WHERE t.project_id = ? AND t.status = 'human_needed'
+         AND (? = 'human' OR EXISTS (SELECT 1 FROM thread_members tm WHERE tm.thread_id = t.id AND tm.participant_id = ?))`,
+      me.project_id,
+      me.kind,
+      me.id,
+    ).map((t) => ({ id: Number(t.n), title: String(t.title), reason: String(t.status_reason) }));
+    const tasks = this.listTasks(me.project_id, { assignee: me, openOnly: true });
     const claims = this.listClaims(me.project_id);
+    const mine = claims.filter((c) => c.holder === me.name);
+    const others = claims.filter((c) => c.holder !== me.name);
+
+    // One short hash per standing section; an empty section hashes to "" so nothing is announced at the start.
+    const h = (parts: string[]) => (parts.length ? createHash("md5").update(parts.join("\n")).digest("hex").slice(0, 8) : "");
+    const digest = [
+      h(forMe.filter((q) => q.id <= me.q_cursor).map((q) => String(q.id))),
+      h(myQuestions.filter((q) => q.status === "open").map((q) => String(q.id))),
+      h(paused.map((t) => `${t.id} ${t.reason}`)),
+      h(tasks.map((t) => `${t.id} ${t.status} ${t.title}`)),
+      h(mine.map((c) => c.path)),
+      h(others.map((c) => `${c.path} ${c.holder}`)),
+    ];
+    const old = me.digest.split(",");
+    const diff = (i: number) => digest[i] !== (old[i] ?? "") || (!!opts.all && digest[i] !== "");
+    const changed = { open: diff(0), waiting: diff(1), paused: diff(2), tasks: diff(3), my_claims: diff(4), others_claims: diff(5) };
+
+    if (!opts.peek) {
+      this.run(
+        "UPDATE participants SET inbox_cursor = ?, thread_cursor = ?, q_cursor = ?, digest = ?, last_seen_at = ? WHERE id = ?",
+        newCursor,
+        Math.max(me.thread_cursor, maxThread),
+        Math.max(me.q_cursor, maxQuestion),
+        // The first section is hashed as it will look next time, when today's new questions are old.
+        [h(forMe.map((q) => String(q.id))), ...digest.slice(1)].join(","),
+        now(),
+        me.id,
+      );
+    }
     return {
       me: this.participantView(me),
       cursor: { from: cursor, to: opts.peek ? cursor : newCursor },
+      q_cursor: me.q_cursor,
+      changed,
       messages,
       more,
       new_threads: newThreads,
-      questions_for_me: this.listQuestions(me.project_id, { status: "open", for: me }),
+      questions_for_me: forMe,
       my_questions: myQuestions,
-      paused_threads: this.all<Row>(
-        `${T_SELECT} WHERE t.project_id = ? AND t.status = 'human_needed'
-           AND (? = 'human' OR EXISTS (SELECT 1 FROM thread_members tm WHERE tm.thread_id = t.id AND tm.participant_id = ?))`,
-        me.project_id,
-        me.kind,
-        me.id,
-      ).map((t) => ({ id: Number(t.n), title: String(t.title), reason: String(t.status_reason) })),
-      my_tasks: this.listTasks(me.project_id, { assignee: me, openOnly: true }),
-      my_claims: claims.filter((c) => c.holder === me.name),
-      others_claims: claims.filter((c) => c.holder !== me.name),
+      paused_threads: paused,
+      my_tasks: tasks,
+      my_claims: mine,
+      others_claims: others,
     };
   }
 
-  /** Resolve when something relevant for the participant happens, or after the timeout. */
+  /** Resolve when something new for the participant happens, or after the timeout. */
   waitForActivity(p: Participant, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
-    const cursor = this.one<{ c: number }>("SELECT inbox_cursor AS c FROM participants WHERE id = ?", p.id)!.c;
-    const pending = this.one<{ c: number }>(
-      `SELECT COUNT(*) AS c FROM messages m LEFT JOIN participants a ON a.id = m.author_id
-        WHERE m.project_id = ? AND m.id > ? AND (m.author_id IS NULL OR m.author_id != ?)
-          AND (? = 'human' OR a.kind = 'human' OR m.kind = 'decision'
-               OR EXISTS (SELECT 1 FROM thread_members tm WHERE tm.thread_id = m.thread_id AND tm.participant_id = ? AND tm.since_id <= m.id))`,
-      p.project_id,
-      cursor,
-      p.id,
-      p.kind,
-      p.id,
-    )!.c;
-    if (pending > 0 || this.listQuestions(p.project_id, { status: "open", for: p }).length > 0) return Promise.resolve(true);
+    if (this.pending(p) > 0) return Promise.resolve(true);
     return new Promise((resolveP) => {
       const finish = (v: boolean) => {
         clearTimeout(timer);

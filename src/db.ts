@@ -9,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
  *   cheap in tokens and hard to mistype or invent.
  * - messages.project_id and thread_members are denormalised so an inbox is one indexed query.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS projects (
@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS participants (
   status_text    TEXT NOT NULL DEFAULT '',
   inbox_cursor   INTEGER NOT NULL DEFAULT 0,          -- last message id delivered via inbox
   thread_cursor  INTEGER NOT NULL DEFAULT 0,          -- last thread id announced via inbox
+  q_cursor       INTEGER NOT NULL DEFAULT 0,          -- last question number announced via inbox
+  digest         TEXT NOT NULL DEFAULT '',            -- hashes of the standing inbox sections last shown
   last_seen_at   TEXT,
   created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE (project_id, name)
@@ -195,8 +197,11 @@ const SEQ: Record<(typeof ROOM_NUMBERED)[number], string> = {
   tasks: "seq_task",
 };
 
-/** v2 → v3: room-local numbers and per-agent secrets. */
-function migrateV2(db: DatabaseSync) {
+/**
+ * v2/v3 → v4: room-local numbers, per-agent secrets, coordination thread, inbox digest.
+ * Idempotent: it checks every column, so it also upgrades either flavour of v3.
+ */
+function migrate(db: DatabaseSync) {
   const cols = (t: string) => (db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
   db.exec("BEGIN");
   try {
@@ -205,6 +210,10 @@ function migrateV2(db: DatabaseSync) {
     }
     if (!cols("projects").includes("coord_thread_id")) db.exec("ALTER TABLE projects ADD COLUMN coord_thread_id INTEGER");
     if (!cols("participants").includes("secret_hash")) db.exec("ALTER TABLE participants ADD COLUMN secret_hash TEXT");
+    if (!cols("participants").includes("q_cursor")) db.exec("ALTER TABLE participants ADD COLUMN q_cursor INTEGER NOT NULL DEFAULT 0");
+    if (!cols("participants").includes("digest")) db.exec("ALTER TABLE participants ADD COLUMN digest TEXT NOT NULL DEFAULT ''");
+    const renumber = !cols("threads").includes("n");
+    if (renumber) {
     for (const t of ROOM_NUMBERED) {
       if (!cols(t).includes("n")) db.exec(`ALTER TABLE ${t} ADD COLUMN n INTEGER NOT NULL DEFAULT 0`);
       db.exec(`UPDATE ${t} SET n = (SELECT COUNT(*) FROM ${t} x WHERE x.project_id = ${t}.project_id AND x.id <= ${t}.id)`);
@@ -215,6 +224,9 @@ function migrateV2(db: DatabaseSync) {
     db.exec(`UPDATE knowledge SET source_message_id = (SELECT m.n FROM messages m WHERE m.id = knowledge.source_message_id) WHERE source_message_id IS NOT NULL`);
     db.exec(`UPDATE knowledge SET superseded_by = (SELECT k.n FROM knowledge k WHERE k.id = knowledge.superseded_by) WHERE superseded_by IS NOT NULL`);
     db.exec(`UPDATE questions SET knowledge_id = (SELECT k.n FROM knowledge k WHERE k.id = questions.knowledge_id) WHERE knowledge_id IS NOT NULL`);
+    // Question cursors were global ids before; restart them so open questions are shown again once.
+    db.exec("UPDATE participants SET q_cursor = 0, digest = ''");
+    }
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
@@ -239,7 +251,7 @@ export function openDatabase(path: string): DatabaseSync {
   if (hasTables && version < 2) {
     throw new Error(`Database ${path} is from the v1 prototype (format v${version}). Delete it or point RUCH_DB elsewhere.`);
   }
-  if (hasTables && version === 2) migrateV2(db);
+  if (hasTables && version < SCHEMA_VERSION) migrate(db);
   db.exec(SCHEMA);
   for (const t of ROOM_NUMBERED) db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${t}_room_n ON ${t}(project_id, n)`);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);

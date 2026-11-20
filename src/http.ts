@@ -283,7 +283,7 @@ export function createHttpServer(hub: Hub, cfg: ServerConfig): Server {
   route("GET", "/api/inbox", async (c) => {
     const wait = Math.min(qnum(c, "wait") ?? 0, 300);
     if (wait > 0) await hub.waitForActivity(c.me, wait * 1000, abortOnClose(c));
-    return hub.inbox(c.me, { peek: c.url.searchParams.get("peek") === "1" });
+    return hub.inbox(c.me, { peek: c.url.searchParams.get("peek") === "1", all: c.url.searchParams.get("all") === "1" });
   }, (o: InboxView) => inboxText(o));
 
   // ---------------------------------------------------------------- threads & messages
@@ -291,10 +291,10 @@ export function createHttpServer(hub: Hub, cfg: ServerConfig): Server {
   route("GET", "/api/threads", (c) => hub.listThreads(pid(c), (c.url.searchParams.get("status") as never) || undefined), (o: Thread[]) =>
     o.length ? o.map(threadHeader).join("\n") : "No threads.",
   );
-  route("POST", "/api/threads", async (c) => hub.createThread(c.me, await c.body(S.thread)), (o) => `Created ${threadHeader(o.thread)}${o.message ? ` (M${o.message.id})` : ""}${warn(o.warnings)}`);
+  route("POST", "/api/threads", async (c) => hub.createThread(c.me, await c.body(S.thread)), (o) => `OK T${o.thread.id}${o.message ? ` M${o.message.id}` : ""}${warn(o.warnings)}`);
   route("GET", "/api/threads/:id", (c) => hub.getThread(pid(c), id(c), { since: qnum(c, "since"), before: qnum(c, "before"), limit: qnum(c, "limit") }), (o) => threadText(o));
   const postText = (o: { message: Message; warnings: string[]; thread: Thread }) =>
-    `OK M${o.message.id} in T${o.thread.id}${o.thread.status !== "open" ? ` (thread: ${o.thread.status})` : ""}${warn(o.warnings)}`;
+    `OK M${o.message.id}${o.thread.status !== "open" ? ` (T${o.thread.id} ${o.thread.status})` : ""}${warn(o.warnings)}`;
   route("POST", "/api/threads/:id/messages", async (c) => hub.post(c.me, id(c), await c.body(S.message)), postText);
   route("POST", "/api/threads/:id/status", async (c) => {
     const b = await c.body(S.threadStatus);
@@ -317,13 +317,13 @@ export function createHttpServer(hub: Hub, cfg: ServerConfig): Server {
     return { ...r, question };
   }, (o) => {
     let t = questionLine(o.question);
-    if (o.question.status === "open") t = `Asked: ${t}`;
-    if (o.similar_knowledge.length) t += "\nAlready in memory (cancel the question if this answers it):\n" + o.similar_knowledge.map(knowledgeLine).join("\n");
+    if (o.question.status === "open") t = `OK Q${o.question.id} T${o.question.thread_id}`;
+    if (o.similar_knowledge.length) t += `\nAlready in memory (if it answers you: cancel ${o.question.id}):\n` + o.similar_knowledge.map(knowledgeLine).join("\n");
     return t + warn(o.warnings);
   });
   route("GET", "/api/questions/:id", async (c) => hub.waitForAnswer(pid(c), id(c), Math.min(qnum(c, "wait") ?? 0, 300) * 1000, abortOnClose(c)), questionLine);
   route("POST", "/api/questions/:id/answer", async (c) => hub.answer(c.me, id(c), await c.body(S.answer)), (o) =>
-    `OK Q${o.question.id} answered${o.question.knowledge_id ? ` → K${o.question.knowledge_id}` : ""}${warn(o.warnings)}`,
+    `OK M${o.message.id}${o.question.knowledge_id ? ` K${o.question.knowledge_id}` : ""}${warn(o.warnings)}`,
   );
   route("POST", "/api/questions/:id/cancel", async (c) => hub.cancelQuestion(c.me, id(c), (await c.body(S.cancel)).reason), questionLine);
   route("POST", "/api/escalate", async (c) => {
@@ -331,7 +331,7 @@ export function createHttpServer(hub: Hub, cfg: ServerConfig): Server {
     const r = hub.ask(c.me, { to: "human", body: b.problem + (b.recommendation ? `\nRecommendation: ${b.recommendation}` : ""), thread_id: b.thread_id, options: b.options, blocking: true });
     hub.setThreadStatus(c.me, b.thread_id, "human_needed", `waiting for the answer to Q${r.question.id}`);
     return r;
-  }, (o) => `Escalated as Q${o.question.id}; T${o.question.thread_id} waits for the human. Don't post there – do other work or wait (in --wait).`);
+  }, (o) => `OK Q${o.question.id}; T${o.question.thread_id} paused for the human – don't post there.`);
 
   // ---------------------------------------------------------------- knowledge
 
@@ -345,11 +345,11 @@ export function createHttpServer(hub: Hub, cfg: ServerConfig): Server {
 
   // ---------------------------------------------------------------- claims
 
-  route("GET", "/api/claims", (c) => hub.listClaims(pid(c)), (o: Claim[]) => (o.length ? o.map(claimLine).join("\n") : "Nothing locked."));
+  route("GET", "/api/claims", (c) => hub.listClaims(pid(c)), (o: Claim[]) => (o.length ? o.map((x) => claimLine(x)).join("\n") : "No locks."));
   route("POST", "/api/claims", async (c) => hub.claim(c.me, await c.body(S.claim)), (o) =>
     [
       o.granted.length ? `Locked: ${o.granted.join(", ")}` : "",
-      o.conflicts.length ? "CONFLICT – someone is editing, don't touch:\n" + o.conflicts.map(claimLine).join("\n") : "",
+      o.conflicts.length ? "CONFLICT – someone is editing, don't touch:\n" + o.conflicts.map((x: Claim) => claimLine(x)).join("\n") : "",
       o.area_conflicts.length
         ? "OTHER AGENT'S AREA – don't edit; ask them: request <Name> \"what you need\"\n" +
           o.area_conflicts.map((a: { path: string; owner: string; rules: string }) => `${a.path} – ${a.owner}${a.rules ? ` (rules: ${a.rules})` : ""}`).join("\n")
@@ -360,7 +360,7 @@ export function createHttpServer(hub: Hub, cfg: ServerConfig): Server {
   );
   route("POST", "/api/claims/release", async (c) => hub.release(c.me, (await c.body(S.release)).paths), (o) => `Released: ${o.released}`);
   route("POST", "/api/claims/check", async (c) => ({ conflicts: hub.checkPaths(pid(c), (await c.body(S.check)).paths, c.me) }), (o) =>
-    o.conflicts.length ? o.conflicts.map(claimLine).join("\n") : "Free.",
+    o.conflicts.length ? o.conflicts.map((x: Claim) => claimLine(x)).join("\n") : "Free.",
   );
 
   // ---------------------------------------------------------------- tasks & handoff
@@ -578,7 +578,11 @@ If you were given no code, first ask the human (in their language): "Do you alre
         };
         const out = await handler(ctx);
         if (res.headersSent || res.destroyed) return;
-        if (toText && wantsText) return sendText(res, 200, toText(out, ctx));
+        if (toText && wantsText) {
+          // Tell agents about waiting news on every reply, so they never call the inbox just to check.
+          const n = a.role === "agent" && url.pathname !== "/api/inbox" && url.pathname !== "/api/join" ? hub.pending(ctx.me) : 0;
+          return sendText(res, 200, toText(out, ctx) + (n ? `\n+${n} new → inbox` : ""));
+        }
         return send(res, 200, out);
       }
       send(res, 404, { error: "not_found", message: `Unknown endpoint ${req.method} ${url.pathname}` });

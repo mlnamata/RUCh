@@ -77,7 +77,7 @@ test("CLI: two agents split the work, request each other's changes, review, and 
   const startB = await ok(dirB, ["start", "build the web UI", "--area", "web/", "--rules", "no inline styles"]);
   assert.match(startB, /Checked in/);
   const startA = await ok(dirA, ["start", "build the cart API", "--area", "api/"]);
-  assert.match(startA, /Areas of others[\s\S]*Beta: web[\s\S]*rules: no inline styles/);
+  assert.match(startA, /Others' areas[\s\S]*Beta: web[\s\S]*rules: no inline styles/);
   assert.match(await ok(dirB, ["in"]), /Starting: build the cart API[\s\S]*@Beta any constraints/);
   await ok(dirB, ["say", "1", "@Alfa keep amounts in cents please"]);
   assert.match(await ok(dirA, ["in"]), /keep amounts in cents/);
@@ -86,19 +86,19 @@ test("CLI: two agents split the work, request each other's changes, review, and 
   assert.match(await ok(dirA, ["claim", "web/cart.html"]), /OTHER AGENT'S AREA[\s\S]*Beta \(rules: no inline styles\)/);
   assert.match(await ok(dirA, ["request", "Beta", "Show cart total in the header", "use GET /cart"]), /Requested #1/);
   assert.match(await ok(dirB, ["in"]), /request #1: Show cart total/);
-  assert.match(await ok(dirB, ["task", "1", "review"]), /\[review\]/);
+  assert.match(await ok(dirB, ["task", "1", "review"]), /^#1 review /);
   assert.match(await ok(dirA, ["in"]), /#1 is ready for your review/);
   assert.match(await ok(dirA, ["feedback", "1", "total must include VAT"]), /Sent back/);
   assert.match(await ok(dirB, ["in"]), /feedback on #1.*include VAT/);
   await ok(dirB, ["task", "1", "review"]);
   assert.match(await fail(dirB, ["approve", "1"]), /can't approve your own work/);
-  assert.match(await ok(dirA, ["approve", "1"]), /\[done\]/);
+  assert.match(await ok(dirA, ["approve", "1"]), /^#1 done /);
   assert.match(await ok(dirB, ["in"]), /#1 approved/);
 
   // Evidence is verified locally before anything is sent.
   assert.match(await fail(dirA, ["say", "1", "Port is 3000", "--kind", "review", "--ev", "api/cart.ts:1", "--quote", "port = 3000"]), /quote is not in/);
   assert.match(await ok(dirA, ["say", "1", "Port is 8080", "--kind", "review", "--ev", "api/cart.ts:1", "--quote", "port = 8080"]), /^OK M\d+/);
-  assert.match(await ok(dirB, ["read", "1"]), /api\/cart\.ts:1 ✓verified/);
+  assert.match(await ok(dirB, ["read", "1"]), /api\/cart\.ts:1 ✓\}/);
   assert.match(await ok(dirB, ["say", "1", "-"], "line 1\nline 2"), /^OK/);
 
   // Agent asks the human and waits; the human answers from the web page (owner key).
@@ -107,7 +107,7 @@ test("CLI: two agents split the work, request each other's changes, review, and 
   const human = new RuchClient({ url, key: ownerUrl.split("#o=")[1], name: "Owner" });
   const qs = await human.get<{ id: number }[]>("/api/questions?status=open");
   await human.post(`/api/questions/${qs[0].id}/answer`, { choice: "B) No", body: "" });
-  assert.match(await asking, /Owner answered: @Beta Choice: B\) No/);
+  assert.match(await asking, /✓ Owner: @Beta Choice: B\) No/);
   assert.match(await ok(dirA, ["mem", "deploy"]), /human-confirmed/);
 
   // Session end: locks and area released, the others are told what's left.
@@ -167,7 +167,7 @@ test("remote MCP endpoint works for clients without a shell", async () => {
     const started = await client.callTool({ name: "coordinate", arguments: { action: "start", text: "write docs", paths: ["docs/"] } });
     assert.match((started.content as { text: string }[])[0].text, /Checked in/);
     const made = await client.callTool({ name: "thread", arguments: { action: "new", title: "From ChatGPT", text: "hi" } });
-    assert.match((made.content as { text: string }[])[0].text, /Created T2/);
+    assert.match((made.content as { text: string }[])[0].text, /^OK T2 M\d+/);
     const err = await client.callTool({ name: "send", arguments: { thread: 9999, text: "x" } });
     assert.equal(err.isError, true);
   } finally {
@@ -188,7 +188,7 @@ test("local stdio MCP server connects with a room code", async () => {
   try {
     assert.match(client.getInstructions() ?? "", /Role: coder/);
     const res = await client.callTool({ name: "inbox", arguments: {} });
-    assert.match((res.content as { text: string }[])[0].text, /Nothing new for Claude1/);
+    assert.match((res.content as { text: string }[])[0].text, /^Nothing new\.$/);
   } finally {
     await client.close();
   }

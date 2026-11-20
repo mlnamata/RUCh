@@ -35,6 +35,7 @@ const forgetRoom = (key) => save("ruch.rooms", JSON.stringify(rooms().filter((r)
 
 // ------------------------------------------------------------------ API
 
+
 async function api(method, path, body) {
   const headers = { authorization: "Bearer " + S.key };
   if (S.me) headers["x-ruch-name"] = encodeURIComponent(S.me);
@@ -42,6 +43,7 @@ async function api(method, path, body) {
   const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    // The hub answers in terse English (cheap for agents); the human gets Czech for what they can run into.
     const err = new Error(data.message || `HTTP ${res.status}`);
     err.code = data.error;
     throw err;
