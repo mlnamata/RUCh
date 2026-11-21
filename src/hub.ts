@@ -33,6 +33,8 @@ export interface HubConfig {
   repeatWindow: number;
   defaultClaimMinutes: number;
   onlineSeconds: number;
+  /** An agent silent this long (or checked out) can be taken over by another agent. */
+  staleMinutes: number;
   humanName: string;
   /** Max messages returned by one inbox call. */
   inboxLimit: number;
@@ -50,6 +52,7 @@ export const DEFAULT_CONFIG: HubConfig = {
   repeatWindow: 6,
   defaultClaimMinutes: 30,
   onlineSeconds: 120,
+  staleMinutes: 15,
   humanName: "Owner",
   inboxLimit: 40,
   roomTtlDays: 30,
@@ -462,6 +465,12 @@ export class Hub {
     const p = this.one<Participant>("SELECT * FROM participants WHERE id = ?", by.id)!;
     this.emit(by.project_id, "participant", this.participantView(p));
     return p;
+  }
+
+  /** Checked out, or silent for staleMinutes: their work may be picked up by someone else. */
+  isGone(p: Pick<Participant, "status_text" | "last_seen_at">): boolean {
+    if (p.status_text.startsWith("finished")) return true;
+    return !p.last_seen_at || Date.parse(p.last_seen_at) < Date.now() - this.config.staleMinutes * 60_000;
   }
 
   participantView(p: Participant) {
@@ -1217,7 +1226,10 @@ export class Hub {
     let assigneeId = num(r.assignee_id);
     if (patch.take) {
       if (assigneeId !== null && assigneeId !== by.id && (r.status === "doing" || r.status === "review")) {
-        throw new HubError(409, "task_taken", `${this.nameOf(assigneeId)} is working on task #${n}. Agree with them before taking it over.`);
+        const holder = this.one<Participant>("SELECT * FROM participants WHERE id = ?", assigneeId);
+        if (holder && !this.isGone(holder)) {
+          throw new HubError(409, "task_taken", `${holder.name} is working on task #${n}. Agree with them before taking it over (or wait until they end / go quiet for ${this.config.staleMinutes} min).`);
+        }
       }
       assigneeId = by.id;
     } else if (patch.assignee !== undefined) {
@@ -1309,9 +1321,23 @@ export class Hub {
   setArea(by: Participant, input: { paths: string[]; description?: string; rules?: string }) {
     const paths = [...new Set(input.paths.map(normalizePath).filter(Boolean))].slice(0, 50);
     if (!paths.length) throw new HubError(400, "no_paths", "Give at least one path (file or folder) for your area.");
-    const clashes = paths.flatMap((p) => this.areaOwners(by.project_id, p, by).map((a) => `${p} overlaps ${a.owner}'s area (${a.paths.join(", ")})`));
+    const owners = new Set<string>();
+    const clashes = paths.flatMap((p) =>
+      this.areaOwners(by.project_id, p, by).map((a) => {
+        owners.add(a.owner);
+        return `${p} overlaps ${a.owner}'s area (${a.paths.join(", ")})`;
+      }),
+    );
     if (clashes.length) {
-      throw new HubError(409, "area_taken", `${clashes.join("; ")}. Agree on a split with them first (or ask them to end/release).`);
+      const gone = [...owners].filter((o) => {
+        const q = this.one<Participant>("SELECT * FROM participants WHERE project_id = ? AND name = ?", by.project_id, o);
+        return q ? this.isGone(q) : false;
+      });
+      throw new HubError(
+        409,
+        "area_taken",
+        `${clashes.join("; ")}. ${gone.length ? `${gone.join(", ")} is gone – continue their work with: takeover ${gone[0]}` : "Agree on a split with them first (or ask them to end/release)."}`,
+      );
     }
     const old = this.one<Row>("SELECT * FROM areas WHERE participant_id = ?", by.id);
     this.run(
@@ -1396,13 +1422,68 @@ export class Hub {
     this.release(by);
     const area = this.listAreas(by.project_id).find((a) => a.owner === by.name);
     if (area && !input.keepArea) this.releaseArea(by);
+    // Unfinished work goes back to the queue (unless the agent keeps its area, i.e. it will be back).
+    const freed = input.keepArea ? [] : open.filter((t) => t.status !== "review");
+    for (const t of freed) this.run("UPDATE tasks SET assignee_id = NULL, status = 'todo', updated_at = ? WHERE project_id = ? AND n = ?", now(), by.project_id, t.id);
+    const coord = Number(this.coordThread(by.project_id).id);
+    const leftTasks = (input.left ?? []).map((l) => l.trim()).filter(Boolean).slice(0, 20).map((l) => this.createTask(by, { title: l, details: `Left by ${by.name} at check-out: ${input.summary.trim()}`.slice(0, 4000) }));
     const lines = [`Done, signing off: ${input.summary.trim()}`];
-    if (input.left?.length) lines.push("Left for anyone:", ...input.left.map((l) => `- ${l}`));
-    if (open.length) lines.push(`Still open on me: ${open.map((t) => `#${t.id} ${t.title} [${t.status}]`).join("; ")}`);
+    const pick = [...freed, ...leftTasks];
+    if (pick.length) lines.push("Free to pick up (task <id> take):", ...pick.map((t) => `- #${t.id} ${t.title}`));
+    const kept = open.filter((t) => !freed.includes(t));
+    if (kept.length) lines.push(`Still on me: ${kept.map((t) => `#${t.id} ${t.title} [${t.status}]`).join("; ")}`);
     if (area) lines.push(input.keepArea ? `Keeping my area ${area.paths.join(", ")}.` : `My area is free now: ${area.paths.join(", ")}.`);
-    const message = this.notice(by, Number(this.coordThread(by.project_id).id), lines.join("\n"), { type: "end" });
+    const message = this.notice(by, coord, lines.join("\n"), { type: "end" });
     this.setStatus(by, `finished: ${input.summary.trim()}`.slice(0, 200));
-    return { message, open_tasks: open };
+    for (const t of [...freed, ...leftTasks]) this.emit(by.project_id, "task", this.getTask(by.project_id, t.id));
+    return { message, open_tasks: kept, freed: pick };
+  }
+
+  /**
+   * Continue the work of an agent that checked out or went quiet (e.g. hit its usage limit):
+   * its area, open tasks and stale locks move to the caller, announced in the coordination thread.
+   */
+  takeover(by: Participant, name: string) {
+    const target = this.one<Participant>("SELECT * FROM participants WHERE project_id = ? AND name = ?", by.project_id, name.trim());
+    if (!target || target.kind !== "agent") throw new HubError(404, "unknown_participant", `"${name}" is not an agent in this room.`);
+    if (target.id === by.id) throw new HubError(400, "self_takeover", "That's you.");
+    if (!this.isGone(target)) {
+      throw new HubError(409, "still_active", `${target.name} is still active (seen ${Math.round((Date.now() - Date.parse(target.last_seen_at!)) / 60000)} min ago). Ask them with a request instead, or wait until they end or go quiet for ${this.config.staleMinutes} min.`);
+    }
+    const theirArea = this.one<Row>("SELECT * FROM areas WHERE participant_id = ?", target.id);
+    const tasks = this.listTasks(by.project_id, { assignee: target, openOnly: true });
+    const result = this.tx(() => {
+      let area: ReturnType<Hub["areaView"]> | null = null;
+      if (theirArea) {
+        const mine = this.one<Row>("SELECT * FROM areas WHERE participant_id = ?", by.id);
+        const paths = [...new Set([...parse<string[]>(mine?.paths, []), ...parse<string[]>(theirArea.paths, [])])];
+        const rules = [mine ? String(mine.rules) : "", String(theirArea.rules)].filter(Boolean).join("; ").slice(0, 1000);
+        this.run("DELETE FROM areas WHERE participant_id = ?", target.id);
+        this.run(
+          `INSERT INTO areas (participant_id, project_id, paths, description, rules, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(participant_id) DO UPDATE SET paths = excluded.paths, rules = excluded.rules, updated_at = excluded.updated_at`,
+          by.id,
+          by.project_id,
+          json(paths),
+          mine ? String(mine.description) : String(theirArea.description),
+          rules,
+          now(),
+        );
+        area = this.areaView(this.one<Row>("SELECT * FROM areas WHERE participant_id = ?", by.id)!);
+      }
+      for (const t of tasks) this.run("UPDATE tasks SET assignee_id = ?, updated_at = ? WHERE project_id = ? AND n = ?", by.id, now(), by.project_id, t.id);
+      const locks = Number(this.run("DELETE FROM claims WHERE holder_id = ?", target.id).changes);
+      return { area, locks };
+    });
+    const lines = [`Taking over ${target.name}'s work${target.status_text ? ` (${target.status_text})` : ""}.`];
+    if (result.area) lines.push(`Area now mine: ${parse<string[]>(theirArea!.paths, []).join(", ")}`);
+    if (tasks.length) lines.push(`Tasks now mine: ${tasks.map((t) => `#${t.id} ${t.title} [${t.status}]`).join("; ")}`);
+    if (result.locks) lines.push(`Released ${result.locks} stale lock(s).`);
+    lines.push(`@${target.name} if you come back, ask me before continuing.`);
+    const message = this.notice(by, Number(this.coordThread(by.project_id).id), lines.join("\n"), { type: "takeover", from: target.name });
+    if (result.area) this.emit(by.project_id, "area", result.area);
+    for (const t of tasks) this.emit(by.project_id, "task", this.getTask(by.project_id, t.id));
+    return { message, from: target.name, area: result.area, tasks: tasks.map((t) => this.getTask(by.project_id, t.id)), locks_released: result.locks };
   }
 
   /** What an agent needs to know when it starts: who owns what, their rules, requests waiting for it. */
@@ -1412,6 +1493,11 @@ export class Hub {
       areas: this.listAreas(by.project_id),
       agents: this.listParticipants(by.project_id).filter((p) => p.name !== by.name),
       requests_for_me: this.listTasks(by.project_id, { assignee: by, openOnly: true }),
+      // Work nobody is doing: unassigned open tasks, and agents who left without finishing.
+      unassigned: this.all<Row>(`${TASK_SELECT} WHERE k.project_id = ? AND k.assignee_id IS NULL AND k.status IN ('todo','blocked') ORDER BY k.n LIMIT 20`, by.project_id).map((r) => this.taskView(r)),
+      gone: this.all<Participant>("SELECT * FROM participants WHERE project_id = ? AND kind = 'agent' AND id != ?", by.project_id, by.id)
+        .filter((p) => this.isGone(p) && (this.one("SELECT 1 FROM areas WHERE participant_id = ?", p.id) || this.one("SELECT 1 FROM tasks WHERE assignee_id = ? AND status != 'done'", p.id)))
+        .map((p) => ({ name: p.name, status_text: p.status_text, last_seen_at: p.last_seen_at })),
       to_review: this.all<Row>(`${TASK_SELECT} WHERE k.project_id = ? AND k.created_by = ? AND k.status = 'review' AND (k.assignee_id IS NULL OR k.assignee_id != ?)`, by.project_id, by.id, by.id).map((r) =>
         this.taskView(r),
       ),

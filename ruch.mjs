@@ -231,6 +231,7 @@ Who works where
   areas                     who owns which paths (+ their rules) · area src/ui/ [--rules "..."] · area --release
   claim path... [--why ...] lock files before editing (blocked in others' areas) · release [path...]
   request Name "what" ["details"]   ask the owner of an area to change something (creates a task)
+  takeover Name             continue the work of an agent that ended or went quiet (area + tasks)
   tasks · task "title" [--to N] · task <id> doing|review|done|blocked|take
   approve <id> · feedback <id> "what to fix"   review work you requested
   handoff T "summary" [--to N] [--done x]... [--next x]... [--risk x]...
@@ -321,6 +322,12 @@ Next: ${SELF} start "your plan" --area <paths you will own>   (rules: ${SELF} he
     const what = text(pos.shift());
     if (!to || !what) die('Usage: request <Name> "what you need" ["details"] [--t T]');
     out(await call(s(), "POST", "/api/requests", { to, what, details: rest() || undefined, thread_id: flags.t ? int(flags.t, "thread") : undefined }));
+    break;
+  }
+
+  case "takeover": {
+    if (!pos[0]) die("Usage: takeover <Name>   (continue the work of an agent that ended or went quiet)");
+    out(await call(s(), "POST", "/api/takeover", { name: pos[0] }));
     break;
   }
 

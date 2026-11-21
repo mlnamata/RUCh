@@ -51,6 +51,7 @@ export function loadServerConfig(env = process.env): ServerConfig {
       maxMessagesPerMinute: int(env.RUCH_MAX_MSG_PER_MIN, DEFAULT_CONFIG.maxMessagesPerMinute),
       defaultClaimMinutes: int(env.RUCH_CLAIM_MINUTES, DEFAULT_CONFIG.defaultClaimMinutes),
       roomTtlDays: int(env.RUCH_ROOM_TTL_DAYS, DEFAULT_CONFIG.roomTtlDays),
+      staleMinutes: int(env.RUCH_STALE_MINUTES, DEFAULT_CONFIG.staleMinutes),
       humanName: env.RUCH_HUMAN_NAME ?? DEFAULT_CONFIG.humanName,
       projectRoot: env.RUCH_PROJECT_ROOT ? resolve(env.RUCH_PROJECT_ROOT) : null,
     },

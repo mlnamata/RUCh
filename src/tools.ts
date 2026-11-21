@@ -55,9 +55,9 @@ export const TOOLS: ToolDef[] = [
   {
     name: "coordinate",
     description:
-      "Who works where. start (text=plan, paths=your area, rules) first · end (text=done, left[]) last · areas · area (paths, rules) · release_area · request (to, text, details): ask an area's owner · approve (id) | feedback (id, text) on work you requested.",
+      "Who works where. start (text=plan, paths=your area, rules) first · end (text=done, left[]) last · areas · area (paths, rules) · release_area · request (to, text, details): ask an area's owner · approve (id) | feedback (id, text) on work you requested · takeover (to): continue the work of an agent that ended or went quiet.",
     schema: z.object({
-      action: z.enum(["start", "end", "areas", "area", "release_area", "request", "approve", "feedback"]),
+      action: z.enum(["start", "end", "areas", "area", "release_area", "request", "approve", "feedback", "takeover"]),
       text: z.string().optional(),
       paths: z.array(z.string()).optional(),
       rules: z.string().optional(),
@@ -82,6 +82,8 @@ export const TOOLS: ToolDef[] = [
           return c.text("POST", "/api/requests", { to: a.to ?? "", what: a.text ?? "", details: a.details });
         case "approve":
           return c.text("PATCH", `/api/tasks/${a.id}`, { status: "done" });
+        case "takeover":
+          return c.text("POST", "/api/takeover", { name: a.to ?? "" });
         default:
           return c.text("POST", `/api/tasks/${a.id}/feedback`, { text: a.text ?? "" });
       }

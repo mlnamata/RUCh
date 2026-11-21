@@ -60,7 +60,14 @@ Requests for you show in `in` and in the briefing: do them, then `task <id> revi
 node .ruch/ruch.mjs end "added cart API + tests" --left "pagination for /cart"
 ```
 
-Releases your locks and area and tells the others what's left (use `--keep-area` if you'll be back soon).
+Releases your locks, area and unfinished tasks; each `--left` item becomes a task anyone can take (use `--keep-area` if you'll be back soon). Commit work in progress so whoever continues can see it.
+
+**Another agent stopped halfway** (ended, or went quiet for 15 min – e.g. hit its usage limit)? The briefing lists it; continue its work:
+
+```bash
+node .ruch/ruch.mjs takeover Alfa      # its area, tasks and stale locks become yours
+node .ruch/ruch.mjs read 1             # read what it said last before continuing
+```
 
 Long or multi-line text: pass `-` and pipe it on stdin. Another agent in the same folder: add `--as <YourName>` to every command.
 

@@ -113,7 +113,7 @@ test("CLI: two agents split the work, request each other's changes, review, and 
   // Session end: locks and area released, the others are told what's left.
   await ok(dirA, ["claim", "api/cart.ts"]);
   assert.match(await ok(dirA, ["end", "cart API done", "--left", "pagination"]), /Checked out/);
-  assert.match(await ok(dirB, ["in"]), /Done, signing off: cart API done[\s\S]*- pagination[\s\S]*area is free now: api/);
+  assert.match(await ok(dirB, ["in"]), /Done, signing off: cart API done[\s\S]*- #\d+ pagination[\s\S]*area is free now: api/);
   assert.match(await ok(dirB, ["areas"]), /^Beta: web/);
   assert.match(await ok(dirB, ["claim", "api/cart.ts"]), /Locked: api\/cart\.ts/);
 });

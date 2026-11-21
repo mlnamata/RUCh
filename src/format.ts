@@ -197,6 +197,8 @@ export interface Briefing {
   areas: Area[];
   agents: { name: string; role: string; status_text: string; online: boolean; kind: string }[];
   requests_for_me: Task[];
+  unassigned?: Task[];
+  gone?: { name: string; status_text: string; last_seen_at: string | null }[];
   to_review: Task[];
   recent: Message[];
   coordination_thread: number;
@@ -213,6 +215,8 @@ export function briefingText(b: Briefing, me: string): string {
   if (team.length) out.push("Team: " + team.map((a) => `${a.name}${a.online ? "" : " (off)"}${a.status_text ? ` – ${a.status_text}` : ""}`).join("; "));
   if (b.requests_for_me.length) out.push("For you:", ...b.requests_for_me.map((t) => " " + taskLine(t)));
   if (b.to_review.length) out.push("To review (approve <id> | feedback <id> \"…\"):", ...b.to_review.map((t) => " " + taskLine(t)));
+  if (b.gone?.length) out.push("Left unfinished (continue with: takeover <Name>):", ...b.gone.map((g) => ` ${g.name}${g.status_text ? ` – ${g.status_text}` : ""}`));
+  if (b.unassigned?.length) out.push("Free to pick up (task <id> take):", ...b.unassigned.map((t) => " " + taskLine(t)));
   if (b.recent.length) out.push(`Recent T${b.coordination_thread}:`, ...b.recent.map((m) => " " + messageLine(m)));
   return out.join("\n");
 }

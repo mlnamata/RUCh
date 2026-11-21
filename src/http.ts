@@ -85,6 +85,7 @@ const S = {
   request: obj({ to: str({ min: 1 }), what: str({ min: 1, max: 200 }), details: opt(str({ max: 4000 })), thread_id: nul(int()) }),
   start: obj({ plan: str({ min: 1, max: 1000 }), paths: opt(paths), description: opt(str({ max: 300 })), rules: opt(str({ max: 1000 })) }),
   end: obj({ summary: str({ min: 1, max: 2000 }), left: opt(strs), keep_area: opt(bool) }),
+  takeover: obj({ name: str({ min: 1, max: 40 }) }),
 };
 
 // ------------------------------------------------------------------ plumbing
@@ -271,7 +272,10 @@ export function createHttpServer(hub: Hub, cfg: ServerConfig): Server {
   route("POST", "/api/end", async (c) => {
     const b = await c.body(S.end);
     return hub.checkOut(c.me, { summary: b.summary, left: b.left, keepArea: b.keep_area });
-  }, (o) => `Checked out (M${o.message.id}). Locks released.${o.open_tasks.length ? `\n! Still assigned to you: ${o.open_tasks.map((t: Task) => `#${t.id}`).join(", ")} – hand them over or finish them next time.` : ""}`);
+  }, (o) => `Checked out (M${o.message.id}). Locks released.${o.freed.length ? ` Free for others: ${o.freed.map((t: Task) => `#${t.id}`).join(" ")}.` : ""}${o.open_tasks.length ? `\n! Still on you (in review): ${o.open_tasks.map((t: Task) => `#${t.id}`).join(", ")}` : ""}`);
+  route("POST", "/api/takeover", async (c) => hub.takeover(c.me, (await c.body(S.takeover)).name), (o) =>
+    `OK took over ${o.from}${o.area ? `; your area: ${o.area.paths.join(", ")}` : ""}${o.tasks.length ? `; tasks: ${o.tasks.map((t: Task) => `#${t.id}`).join(" ")}` : ""}${o.locks_released ? `; ${o.locks_released} stale lock(s) freed` : ""}. Read their last messages in T1 (read 1) before continuing.`,
+  );
   route("GET", "/api/areas", (c) => hub.listAreas(pid(c)), (o: Area[]) => (o.length ? o.map(areaLine).join("\n") : "No areas yet."));
   route("POST", "/api/areas", async (c) => hub.setArea(c.me, await c.body(S.area)), (o: Area) => `Your area: ${o.paths.join(", ")}${o.rules ? `\nrules: ${o.rules}` : ""}`);
   route("DELETE", "/api/areas", (c) => hub.releaseArea(c.me), (o) => (o.released ? "Area released." : "You had no area."));

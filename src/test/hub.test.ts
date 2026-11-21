@@ -171,7 +171,7 @@ test("start/end: check-in announces plan and area and asks for constraints; chec
   assert.equal(hub.getThread(a.project_id, 1).thread.status, "open");
   hub.claim(a, { paths: ["src/api/x.ts"] });
   const end = hub.checkOut(a, { summary: "API done", left: ["pagination"] });
-  assert.match(end.message.body, /Done, signing off: API done\nLeft for anyone:\n- pagination/);
+  assert.match(end.message.body, /Done, signing off: API done\nFree to pick up \(task <id> take\):\n- #\d+ pagination/);
   assert.equal(hub.listClaims(a.project_id).length, 0);
   assert.equal(hub.listAreas(a.project_id).some((x) => x.owner === "Alfa"), false);
   assert.match(hub.participantView(hub.identify(a.project_id, "Alfa", "agent", null)).status_text, /^finished/);
@@ -312,4 +312,39 @@ test("a v2 database is migrated to room-local numbers", () => {
   const next = hub.createThread(alfa, { title: "new" });
   assert.ok(next.thread.id >= 3);
   assert.equal(hub.getThread(2, 1).thread.title, "b-1");
+});
+
+test("takeover: an agent that went quiet hands its area, tasks and locks to whoever continues", () => {
+  const { hub, a, b, human } = setup({ staleMinutes: 15 });
+  hub.checkIn(a, { plan: "cart API", paths: ["api/"], rules: "amounts in cents" });
+  const t = hub.createTask(human, { title: "Cart endpoint", assignee: "Alfa" });
+  hub.updateTask(a, t.id, { status: "doing" });
+  hub.claim(a, { paths: ["api/cart.ts"] });
+  // While Alfa is active, nobody can take its work.
+  rejects(() => hub.takeover(b, "Alfa"), "still_active");
+  rejects(() => hub.updateTask(b, t.id, { take: true }), "task_taken");
+  rejects(() => hub.setArea(b, { paths: ["api/x.ts"] }), "area_taken");
+  // Alfa hits its usage limit and goes quiet.
+  (hub as any).db.prepare("UPDATE participants SET last_seen_at = '2000-01-01T00:00:00Z' WHERE id = ?").run(a.id);
+  assert.throws(() => hub.setArea(b, { paths: ["api/x.ts"] }), /takeover Alfa/);
+  assert.equal(hub.briefing(b).gone?.[0].name, "Alfa");
+  const r = hub.takeover(b, "Alfa");
+  assert.deepEqual(r.area?.paths, ["api"]);
+  assert.equal(r.tasks[0].assignee, "Beta");
+  assert.equal(r.locks_released, 1);
+  assert.match(r.message.body, /Taking over Alfa's work[\s\S]*Area now mine: api[\s\S]*#1 Cart endpoint/);
+  assert.equal(hub.claim(b, { paths: ["api/cart.ts"] }).granted.length, 1);
+  rejects(() => hub.takeover(b, "Beta"), "self_takeover");
+});
+
+test("check-out frees unfinished tasks and turns 'left' items into tasks others can take", () => {
+  const { hub, a, b, human } = setup();
+  hub.checkIn(a, { plan: "docs", paths: ["docs/"] });
+  const t = hub.createTask(human, { title: "Write intro", assignee: "Alfa" });
+  hub.updateTask(a, t.id, { status: "doing" });
+  const end = hub.checkOut(a, { summary: "half done", left: ["Add examples"] });
+  assert.equal(end.freed.length, 2);
+  const open = hub.briefing(b).unassigned!.map((x) => x.title).sort();
+  assert.deepEqual(open, ["Add examples", "Write intro"]);
+  assert.equal(hub.updateTask(b, t.id, { take: true }).assignee, "Beta");
 });

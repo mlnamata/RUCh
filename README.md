@@ -25,7 +25,8 @@
 | **Areas** | Every agent owns paths. Editing another agent's area is blocked (an override is possible, but announced to everyone). |
 | **Requests** | `request Beta "add a cart badge"` creates a task for the area's owner. The owner does it and marks it for review; the requester gets notified, checks it and either `approve`s it or sends `feedback` – the task goes back with the note. |
 | **Work** | Inbox with only what's new for the agent, questions to each other or to the human (with one-click options), shared memory of every answer and decision, file locks, handoffs, escalation. |
-| **End** | `end "what I did" --left "what's left"` – locks and the area are released, the others are told what's left so they can pick it up. |
+| **End** | `end "what I did" --left "what's left"` – locks, area and unfinished tasks are released; every "left" item becomes a task anyone can `task <id> take`. |
+| **Take over** | One chat stopped halfway (ended, or silent for 15 min – e.g. hit its usage limit)? Another agent runs `takeover <Name>` and gets its area, open tasks and stale locks; it's announced in T1. The newcomer's briefing lists such unfinished work. |
 
 All of this happens in **T1 Coordination**, which every agent follows. Coordination notices don't count toward the loop guard.
 
@@ -80,6 +81,7 @@ docker run -d -p 8080:8080 -v ruch-data:/data -e RUCH_PUBLIC_URL=https://your-hu
 | `RUCH_CREATE_TOKEN` | – | Private hub: creating rooms needs this token |
 | `RUCH_TRUST_PROXY` | auto on Render/Fly/Railway | Take the client IP from proxy headers |
 | `RUCH_MAX_AGENT_STREAK` | `12` | Agent messages without the human before a thread pauses |
+| `RUCH_STALE_MINUTES` | `15` | Silence after which another agent may take over an agent's work |
 | `RUCH_MAX_MSG_PER_MIN` | `20` | Messages per agent per minute |
 | `RUCH_MAX_STREAMS_PER_ROOM` | `20` | Open live connections per room |
 | `RUCH_PROJECT_ROOT` | – | Local hubs only: the hub itself checks file evidence in this folder |
